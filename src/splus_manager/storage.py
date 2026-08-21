@@ -130,6 +130,33 @@ class Store:
             db.execute("INSERT INTO warnings(chat_id,user_id,count) VALUES(?,?,1) ON CONFLICT(chat_id,user_id) DO UPDATE SET count=count+1", (chat_id, user_id))
             return db.execute("SELECT count FROM warnings WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()[0]
 
+    def remove_warning(self, chat_id: str, user_id: str) -> int:
+        """Remove one warning, never allowing a negative warning count."""
+        with self._conn() as db:
+            row = db.execute("SELECT count FROM warnings WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()
+            count = max(0, (row[0] if row else 0) - 1)
+            if count:
+                db.execute("UPDATE warnings SET count=? WHERE chat_id=? AND user_id=?", (count, chat_id, user_id))
+            else:
+                db.execute("DELETE FROM warnings WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+            return count
+
+    def reset_warnings(self, chat_id: str, user_id: str) -> None:
+        with self._conn() as db:
+            db.execute("DELETE FROM warnings WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+
+    def warning_count(self, chat_id: str, user_id: str) -> int:
+        with self._conn() as db:
+            row = db.execute("SELECT count FROM warnings WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()
+        return int(row[0]) if row else 0
+
+    def list_warnings(self, chat_id: str) -> list[tuple[str, int]]:
+        with self._conn() as db:
+            rows = db.execute(
+                "SELECT user_id,count FROM warnings WHERE chat_id=? AND count>0 ORDER BY count DESC,user_id", (chat_id,),
+            ).fetchall()
+        return [(str(row["user_id"]), int(row["count"])) for row in rows]
+
     def log(self, chat_id: str, actor_id: str, target_id: str | None, action: Action, detail: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._conn() as db:

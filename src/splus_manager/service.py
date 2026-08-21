@@ -33,6 +33,7 @@ COMMAND_PREFIXES = (
     "ضداسپم", "فیلتر", "پردازش لینک", "پشتیبانی", "صدا زدن اعضا",
     "افزودن جواب", "اضافه کردن جواب",
     "حذف جواب", "جواب‌ها", "تگ",
+    "ریست اخطار", "کم اخطار", "ان اخطار", "حذف اخطار", "لیست اخطار", "توهین",
 )
 PANEL_COMMANDS = {
     "پنل", "راهنما", "📋 راهنما",
@@ -120,6 +121,7 @@ DEFAULT_SPAM_OPTIONS: dict[str, bool | int] = {
     "repeat_chars_enabled": True,
     "length_enabled": True,
     "word_filter_enabled": False,
+    "auto_insult_warn": False,
     "flood_count": 5,
     "flood_seconds": 10,
     "duplicate_count": 3,
@@ -128,6 +130,9 @@ DEFAULT_SPAM_OPTIONS: dict[str, bool | int] = {
     "repeat_char_limit": 12,
     "max_length": 1500,
 }
+INSULT_WORDS = (
+    "احمق", "نادان", "بی شعور", "بیشعور", "عوضی", "کثافت", "حرومزاده",
+)
 SPAM_TOGGLE_ALIASES = {
     "فلود": "flood_enabled", "سرعت": "flood_enabled",
     "تکرار": "duplicate_enabled", "تکراری": "duplicate_enabled",
@@ -198,6 +203,8 @@ class Manager:
         if await self._enforce_locks(message, settings):
             return
         if await self._enforce_ad_filters(message):
+            return
+        if await self._enforce_auto_insult_warning(message):
             return
         if await self._enforce_spam_and_words(message):
             return
@@ -285,6 +292,12 @@ class Manager:
 
     async def _command(self, message: Message) -> None:
         text = message.text.strip()
+        if text.startswith("توهین"):
+            await self._auto_insult_warning_settings(message)
+            return
+        if text.startswith("لیست اخطار"):
+            await self._warning_list(message)
+            return
         if text.startswith("پشتیبانی"):
             await self._support_command(message)
             return
@@ -363,6 +376,14 @@ class Manager:
             await self.gateway.send_message(message.chat_id, f"⚠️ اخطار {count} از {s.warning_limit} ثبت شد.")
             if count >= s.warning_limit:
                 await self._apply_warning_action(message, target.sender_id)
+        elif text.startswith(("کم اخطار", "ان اخطار", "حذف اخطار")):
+            count = self.store.remove_warning(message.chat_id, target.sender_id)
+            self.store.log(message.chat_id, message.sender_id, target.sender_id, Action.WARN_REMOVE, f"count={count}")
+            await self.gateway.send_message(message.chat_id, f"✅ یک اخطار کم شد؛ اخطارهای باقی‌مانده: {count}.")
+        elif text.startswith("ریست اخطار"):
+            self.store.reset_warnings(message.chat_id, target.sender_id)
+            self.store.log(message.chat_id, message.sender_id, target.sender_id, Action.WARN_RESET, "count=0")
+            await self.gateway.send_message(message.chat_id, "✅ همهٔ اخطارهای کاربر پاک شد.")
         elif text.startswith(("🔇", "سکوت")):
             minutes = next((v for k, v in DURATIONS.items() if k in text), None) or _find_duration(text)
             if minutes is None:
@@ -592,6 +613,51 @@ class Manager:
             f"message={message.message_id};reasons={','.join(reasons)}",
         )
         return True
+
+    async def _auto_insult_warning_settings(self, message: Message) -> None:
+        raw = _normal_permission_text(_remove_prefix(message.text, "توهین خودکار اخطار", "توهین"))
+        options = self.store.spam_options(message.chat_id, DEFAULT_SPAM_OPTIONS)
+        if raw in {"روشن", "فعال"}:
+            options["auto_insult_warn"] = True
+        elif raw in {"خاموش", "غیرفعال"}:
+            options["auto_insult_warn"] = False
+        else:
+            state = "روشن ✅" if bool(options["auto_insult_warn"]) else "خاموش ⭕"
+            await self.gateway.send_message(message.chat_id, f"⚠️ اخطار خودکار توهین: {state}\nفرمان‌ها: توهین خودکار اخطار روشن | خاموش")
+            return
+        self.store.save_spam_options(message.chat_id, options)
+        state = "روشن ✅" if bool(options["auto_insult_warn"]) else "خاموش ⭕"
+        await self.gateway.send_message(message.chat_id, f"⚠️ اخطار خودکار توهین: {state}")
+
+    async def _enforce_auto_insult_warning(self, message: Message) -> bool:
+        if message.is_outgoing:
+            return False
+        options = self.store.spam_options(message.chat_id, DEFAULT_SPAM_OPTIONS)
+        if not bool(options["auto_insult_warn"]):
+            return False
+        if await self.gateway.is_group_admin(message.chat_id, message.sender_id):
+            return False
+        if not any(_phrase_matches(_normalize_spam_text(message.text), word) for word in INSULT_WORDS):
+            return False
+        count = self.store.add_warning(message.chat_id, message.sender_id)
+        settings = self.store.settings(message.chat_id)
+        self.store.log(message.chat_id, "system", message.sender_id, Action.AUTO_INSULT_WARN, f"count={count}")
+        await self.gateway.send_message(message.chat_id, f"⚠️ به‌دلیل توهین، اخطار {count} از {settings.warning_limit} ثبت شد.")
+        if count >= settings.warning_limit:
+            await self._apply_warning_action(message, message.sender_id)
+        return True
+
+    async def _warning_list(self, message: Message) -> None:
+        if message.reply_to_id is not None:
+            target = await self._target(message)
+            if target is None:
+                return
+            count = self.store.warning_count(message.chat_id, target.sender_id)
+            await self.gateway.send_message(message.chat_id, f"⚠️ اخطارهای کاربر: {count}")
+            return
+        warnings = self.store.list_warnings(message.chat_id)
+        body = "\n".join(f"• کاربر {user_id}: {count} اخطار" for user_id, count in warnings)
+        await self.gateway.send_message(message.chat_id, f"📋 فهرست اخطارها\n\n{body or 'هیچ اخطاری ثبت نشده است.'}")
 
     async def _process_links(self, message: Message) -> None:
         if not self.store.link_processing_enabled(message.chat_id):
@@ -1280,6 +1346,8 @@ def _full_help() -> str:
         "👥 مدیریت اعضا (با ریپلای)\n"
         "• سکوت ۵دقیقه\n"
         "• اخطار\n"
+        "• کم اخطار / ریست اخطار\n"
+        "• لیست اخطار (با یا بدون ریپلای)\n"
         "• مسدود کردن\n"
         "• حذف پیام\n\n"
         "📣 اعضا و پاسخ خودکار\n"
@@ -1301,6 +1369,8 @@ def _full_help() -> str:
         "• ضداسپم روشن\n"
         "• ضداسپم وضعیت\n"
         "• ضداسپم همه روشن\n\n"
+        "⚠️ توهین\n"
+        "• توهین خودکار اخطار روشن / خاموش\n\n"
         "⏰ چت\n"
         "• چت باز / چت بسته\n"
         "• چت خودکار 23:00 تا 07:00\n"

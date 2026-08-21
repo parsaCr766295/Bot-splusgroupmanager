@@ -53,6 +53,28 @@ def test_warning_limit_mutes_member(tmp_path):
     assert gateway.muted == [("member", timedelta(minutes=60))]
 
 
+def test_warning_commands_can_remove_reset_and_list_warnings(tmp_path):
+    gateway = FakeGateway()
+    manager = Manager(gateway, Store(str(tmp_path / "db.sqlite")), "group")
+    run(manager.handle(Message("group", 3, "admin", "اخطار", 2)))
+    run(manager.handle(Message("group", 4, "admin", "اخطار", 2)))
+    run(manager.handle(Message("group", 5, "admin", "کم اخطار", 2)))
+    assert "باقی‌مانده: 1" in gateway.sent[-1]
+    run(manager.handle(Message("group", 6, "admin", "لیست اخطار")))
+    assert "کاربر member: 1 اخطار" in gateway.sent[-1]
+    run(manager.handle(Message("group", 7, "admin", "ریست اخطار", 2)))
+    assert manager.store.warning_count("group", "member") == 0
+
+
+def test_auto_insult_warning_is_configurable_and_uses_warning_limit(tmp_path):
+    gateway = FakeGateway()
+    manager = Manager(gateway, Store(str(tmp_path / "db.sqlite")), "group")
+    run(manager.handle(Message("group", 3, "admin", "توهین خودکار اخطار روشن")))
+    for message_id in range(4, 7):
+        run(manager.handle(Message("group", message_id, "member", "تو خیلی احمق هستی")))
+    assert gateway.muted == [("member", timedelta(minutes=60))]
+
+
 def test_anti_link_deletes_and_logs(tmp_path):
     gateway = FakeGateway()
     manager = Manager(gateway, Store(str(tmp_path / "db.sqlite")), "group")
